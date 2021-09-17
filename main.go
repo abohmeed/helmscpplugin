@@ -107,7 +107,7 @@ func Upload(filename string) error {
 	baseFileName := filepath.Base(filename)
 	// Finaly, copy the file over
 	// Usage: CopyFile(fileReader, remotePath, permission)
-	err = client.CopyFile(f, remotePath+baseFileName, "0444")
+	err = client.CopyFile(f, remotePath+baseFileName, "0644")
 	if err != nil {
 		log.Fatalf("Could not upload the file to the remote server: %s", err)
 		return err
