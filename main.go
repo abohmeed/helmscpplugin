@@ -19,6 +19,9 @@ var username, key, port, chartPath, remotePath, host string
 var helmBin string
 
 func initialize() {
+	flag.Usage = func() {
+		flag.PrintDefaults()
+	}
 	flag.StringVar(&username, "u", "", "The remote server username")
 	flag.StringVar(&key, "k", os.Getenv("HOME")+"/.ssh/id_rsa", "The SSH key")
 	flag.StringVar(&port, "p", "22", "The remote server port")
@@ -27,14 +30,31 @@ func initialize() {
 	flag.StringVar(&host, "s", "", "The hostname or IP address")
 	flag.Parse()
 	if host == "" {
-		panic("Please supply the hostname or IP address to the remote host")
+		flag.PrintDefaults()
+		fmt.Println("Please supply the hostname or IP address to the remote host")
+		os.Exit(2)
+	}
+	if username == "" {
+		flag.PrintDefaults()
+		fmt.Println("Please provide the username to connect to the remote host over SSH")
+		os.Exit(2)
+	}
+	if remotePath == "" {
+		flag.PrintDefaults()
+		fmt.Println("Please provide the remote path to save the file")
+		os.Exit(2)
+	}
+	if chartPath == "" {
+		flag.PrintDefaults()
+		fmt.Println("Please provide the path to the Helm chart")
+		os.Exit(2)
 	}
 }
 func main() {
 	initialize()
 	chartFile, err := Package(chartPath)
 	if err != nil {
-		log.Fatalf("Error while packahging the chart: %s", err)
+		log.Fatalf("Error while packaging the chart: %s", err)
 	}
 	err = Upload(chartFile)
 	if err != nil {
