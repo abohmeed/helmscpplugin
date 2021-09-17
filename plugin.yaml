@@ -3,7 +3,7 @@ version: "0.1.0"
 usage: "helm scp"
 description: "Package and upload Helm charts over SCP"
 ignoreFlags: false
-command: "bin/helmscp-linux"
+command: "bin/helmscp.sh"
 platformCommand:
   - os: linux
     arch: amd64

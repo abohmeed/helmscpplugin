@@ -8,5 +8,20 @@ make build
 ```
 Use the binary as 
 ```bash
-./helmscp -u remote_user -l /path/to/chart -r /path/to/remote/dir -s hostname -p SSH port (22 by default) -k path to the SSH private key (defaults to ~/.ssh/id_rsa)
+./helmscp -u remote_user -l /path/to/chart -r /path/to/remote/dir -s hostname -p SSH port (22 by default) -k path/to/private/key (defaults to ~/.ssh/id_rsa)
 ```
+## As a Helm plugin
+Install the plugin by running 
+```bash
+helm plugin install https://github.com/abohmeed/helmscpplugin
+```
+Alternatively you can clone the repo and run 
+```bash
+helm plugin install /path/to/cloned/repo
+```
+Then you can use it as follows:
+```bash
+helm scp -u remote_user -l /path/to/chart -r /path/to/remote/dir -s hostname -p SSH port (22 by default) -k path/to/private/key (defaults to ~/.ssh/id_rsa)
+```
+# The bash version
+The same functionality was ported to a bash shell script and it can be used in the same way as the above.
