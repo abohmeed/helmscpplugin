@@ -55,11 +55,14 @@ func main() {
 	chartFile, err := Package(chartPath)
 	if err != nil {
 		log.Fatalf("Error while packaging the chart: %s", err)
+		return
 	}
 	err = Upload(chartFile)
 	if err != nil {
 		log.Fatalf("Error while uploading the archive: %s", err)
+		return
 	}
+	fmt.Printf("Success!\n")
 }
 func Package(chartPath string) (string, error) {
 	if os.Getenv("HELM_BIN") != "" {
@@ -67,6 +70,7 @@ func Package(chartPath string) (string, error) {
 	} else {
 		helmBin = "helm"
 	}
+	fmt.Printf("Packaging chart from %s\n", chartPath)
 	cmd := exec.Command(helmBin, "package", chartPath)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -105,6 +109,7 @@ func Upload(filename string) error {
 	defer f.Close()
 	defer os.Remove(filename)
 	baseFileName := filepath.Base(filename)
+	fmt.Printf("Uploading %s to %s at %s@%s:%s\n", baseFileName, remotePath, username, host, port)
 	// Finaly, copy the file over
 	// Usage: CopyFile(fileReader, remotePath, permission)
 	err = client.CopyFile(f, remotePath+baseFileName, "0644")
@@ -112,5 +117,6 @@ func Upload(filename string) error {
 		log.Fatalf("Could not upload the file to the remote server: %s", err)
 		return err
 	}
+	fmt.Printf("Cleaning up\n")
 	return nil
 }
