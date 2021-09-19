@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -24,6 +22,7 @@ const (
 	Upload = iota
 	Download
 	Delete
+	Init
 )
 const Protocol = "scp"
 
@@ -67,6 +66,8 @@ func initialize() (URL, error) {
 	var err error
 	if os.Getenv("SCP_KEY") != "" {
 		key = os.Getenv("SCP_KEY")
+	} else {
+		key = fmt.Sprintf("%s/.ssh/id_rsa", os.Getenv("HOME"))
 	}
 	if len(os.Args) == 4 {
 		if os.Args[1] == "push" {
@@ -88,7 +89,11 @@ func initialize() (URL, error) {
 		if err != nil {
 			return URL{}, errors.New("please make sure the URL is scp://username@host[:port]/path")
 		}
-		action = Delete
+		if os.Args[1] == "delete" {
+			action = Delete
+		} else if os.Args[1] == "init" {
+			action = Init
+		}
 	} else {
 		return URL{}, errors.New("incorrect arguments.\nUsage:\nhelmscp push /path/to/chart scp://username@hostname[:port]/path/to/remote\nOR\nhelmscp scp://username@hostname:port/path/to/chart")
 	}
@@ -140,7 +145,7 @@ func Package(chartPath string) (string, error) {
 	return chartNameFullPath, nil
 }
 func Scp(filename string, url URL, action Action) error {
-	clientConfig, _ := auth.PrivateKey(url.username, key, func(hostname string, remote net.Addr, key ssh.PublicKey) error { return nil })
+	clientConfig, _ := auth.PrivateKey(url.username, key, ssh.InsecureIgnoreHostKey())
 	client := scp.NewClient(url.host+":"+url.port, &clientConfig)
 	err := client.Connect()
 	if err != nil {
@@ -214,14 +219,27 @@ func Scp(filename string, url URL, action Action) error {
 		if err := session.Run("rm -f " + remoteFile); err != nil {
 			return fmt.Errorf("could not delete %s", remoteFile)
 		}
-		reindex(url)
+		err = reindex(url)
+		if err != nil {
+			return err
+		}
+		return nil
+	} else if action == Init {
+		err = reindex(url)
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 	return nil
 }
+
 func reindex(url URL) error {
-	charDir := path.Dir(url.path)
-	clientConfig, _ := auth.PrivateKey(url.username, key, func(hostname string, remote net.Addr, key ssh.PublicKey) error { return nil })
+	if strings.HasSuffix(url.path, "/") {
+		return errors.New("remote path must be a file not a directory")
+	}
+	chartDir := url.path
+	clientConfig, _ := auth.PrivateKey(url.username, key, ssh.InsecureIgnoreHostKey())
 	sshClient, err := ssh.Dial("tcp", url.host+":"+url.port, &clientConfig)
 	if err != nil {
 		return err
@@ -229,11 +247,12 @@ func reindex(url URL) error {
 	defer sshClient.Close()
 	session, err := sshClient.NewSession()
 	if err != nil {
-		return err
+		return fmt.Errorf("error while connecting to remote server: %s", err)
 	}
 	defer session.Close()
-	if err := session.Run("helm index " + charDir); err != nil {
-		return err
+	fmt.Printf("Indexing %s\n", chartDir)
+	if err := session.Run("helm repo index " + chartDir); err != nil {
+		return fmt.Errorf("error while reindexing: %s", err)
 	}
 	return nil
 }
