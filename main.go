@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -21,6 +22,7 @@ type Action int
 const (
 	Upload = iota
 	Download
+	Delete
 )
 const Protocol = "scp"
 
@@ -35,7 +37,6 @@ type URL struct {
 	path     string
 }
 
-// helm scp push /path/to/chart scp://ahmed@192.168.2.164:22/myrepo
 func detokenize(url string) (URL, error) {
 	regex := `scp:\/\/(\w+)@(\d+\.\d+\.\d+\.\d+):?(\d+)?(.*)$`
 	r := regexp.MustCompile(regex)
@@ -81,6 +82,12 @@ func initialize() (URL, error) {
 			return URL{}, errors.New("please make sure the URL is scp://username@host[:port]/path")
 		}
 		action = Download
+	} else if len(os.Args) == 3 {
+		url, err = detokenize(os.Args[2])
+		if err != nil {
+			return URL{}, errors.New("please make sure the URL is scp://username@host[:port]/path")
+		}
+		action = Delete
 	} else {
 		return URL{}, errors.New("incorrect arguments.\nUsage:\nhelmscp push /path/to/chart scp://username@hostname[:port]/path/to/remote\nOR\nhelmscp scp://username@hostname:port/path/to/chart")
 	}
@@ -105,7 +112,7 @@ func main() {
 		}
 		fmt.Printf("Success!\n")
 	} else {
-		err = Scp("", url, Download)
+		err = Scp("", url, action)
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
@@ -141,10 +148,11 @@ func Scp(filename string, url URL, action Action) error {
 	}
 	// Close client connection after the file has been copied
 	defer client.Close()
+	remoteFile := url.path
 	baseFileName := filepath.Base(filename)
 	if action == Upload {
-		if url.path[len(url.path)-1:] != "/" {
-			url.path = url.path + "/"
+		if !strings.HasSuffix(remoteFile, "/") {
+			remoteFile = remoteFile + "/"
 		}
 		// Open a file
 		f, err := os.Open(filename)
@@ -154,17 +162,17 @@ func Scp(filename string, url URL, action Action) error {
 		}
 		defer f.Close()
 		defer os.Remove(filename)
-		fmt.Printf("Uploading %s to %s at %s@%s:%s\n", baseFileName, url.path, url.username, url.host, url.port)
+		fmt.Printf("Uploading %s to %s at %s@%s:%s\n", baseFileName, remoteFile, url.username, url.host, url.port)
 		// Finaly, copy the file over
 		// Usage: CopyFile(fileReader, remotePath, permission)
 		err = client.CopyFile(f, url.path+baseFileName, "0644")
 		if err != nil {
 			return err
 		}
+		reindex(url)
 		fmt.Printf("Cleaning up\n")
 		return nil
-	} else {
-		remoteFile := url.path
+	} else if action == Download {
 		// Must point to a file not a directory
 		if strings.HasSuffix(remoteFile, "/") {
 			return errors.New("remote path must be a file not a directory")
@@ -187,5 +195,44 @@ func Scp(filename string, url URL, action Action) error {
 			return err
 		}
 		return nil
+	} else if action == Delete {
+		if strings.HasSuffix(remoteFile, "/") {
+			return errors.New("remote path must be a file not a directory")
+		}
+		sshClient, err := ssh.Dial("tcp", url.host+":"+url.port, &clientConfig)
+		if err != nil {
+			return err
+		}
+		defer sshClient.Close()
+		session, err := sshClient.NewSession()
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+		fmt.Printf("Deleting %s\n", remoteFile)
+		if err := session.Run("rm -f " + remoteFile); err != nil {
+			return fmt.Errorf("could not delete %s", remoteFile)
+		}
+		reindex(url)
+		return nil
 	}
+	return nil
+}
+func reindex(url URL) error {
+	charDir := path.Dir(url.path)
+	clientConfig, _ := auth.PrivateKey(url.username, key, ssh.InsecureIgnoreHostKey())
+	sshClient, err := ssh.Dial("tcp", url.host+":"+url.port, &clientConfig)
+	if err != nil {
+		return err
+	}
+	defer sshClient.Close()
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	if err := session.Run("helm index " + charDir); err != nil {
+		return err
+	}
+	return nil
 }
