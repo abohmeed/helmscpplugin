@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -29,12 +31,17 @@ const Protocol = "scp"
 var key, chartPath string
 var action Action
 var helmBin string
+var AllowedActions = []string{"init", "push", "delete"}
 
 type URL struct {
 	username string
 	host     string
 	port     string
 	path     string
+}
+type Repo struct {
+	Name string `json:"name"`
+	Url  string `json:"url"`
 }
 
 func detokenize(url string) (URL, error) {
@@ -61,6 +68,36 @@ func detokenize(url string) (URL, error) {
 		path:     remotePath,
 	}, nil
 }
+func contains(arr []string, str string) bool {
+	for _, a := range arr {
+		if a == str {
+			return true
+		}
+	}
+	return false
+}
+func getRepoURL(repo string) (string, error) {
+	var repoURL string
+	cmd := exec.Command(helmBin, "repo", "list", "-o", "json")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
+	var repos []Repo
+	err = json.Unmarshal(out.Bytes(), &repos)
+	if err != nil {
+		return "", fmt.Errorf("could not parse helm repo list output: %s", err)
+	}
+	for _, r := range repos {
+		if r.Name == repo {
+			repoURL = r.Url
+			break
+		}
+	}
+	return repoURL, nil
+}
 func initialize() (URL, error) {
 	var url URL
 	var err error
@@ -69,31 +106,34 @@ func initialize() (URL, error) {
 	} else {
 		key = fmt.Sprintf("%s/.ssh/id_rsa", os.Getenv("HOME"))
 	}
-	if len(os.Args) == 4 {
-		if os.Args[1] == "push" {
-			url, err = detokenize(os.Args[3])
-			if err != nil {
-				return url, errors.New("please make sure the URL is scp://username@host[:port]/path")
-			}
-			chartPath = os.Args[2]
-			action = Upload
-		}
-	} else if len(os.Args) == 5 {
+	if os.Getenv("HELM_BIN") != "" {
+		helmBin = os.Getenv("HELM_BIN")
+	} else {
+		helmBin = "helm"
+	}
+	// if the plugin is used as a downloader plugin
+	if len(os.Args) == 5 && !contains(AllowedActions, os.Args[1]) {
 		url, err = detokenize(os.Args[4])
 		if err != nil {
 			return URL{}, errors.New("please make sure the URL is scp://username@host[:port]/path")
 		}
 		action = Download
-	} else if len(os.Args) == 3 {
+	} else if os.Args[1] == "push" {
+		url, err = detokenize(os.Args[3])
+		if err != nil {
+			return url, errors.New("please make sure the URL is scp://username@host[:port]/path")
+		}
+		chartPath = os.Args[2]
+		action = Upload
+	} else if os.Args[1] == "delete" {
+		// We don't pass the URL when deleting charts
+		action = Delete
+	} else if os.Args[1] == "init" {
 		url, err = detokenize(os.Args[2])
 		if err != nil {
-			return URL{}, errors.New("please make sure the URL is scp://username@host[:port]/path")
+			return url, errors.New("please make sure the URL is scp://username@host[:port]/path")
 		}
-		if os.Args[1] == "delete" {
-			action = Delete
-		} else if os.Args[1] == "init" {
-			action = Init
-		}
+		action = Init
 	} else {
 		return URL{}, errors.New("incorrect arguments.\nUsage:\nhelmscp push /path/to/chart scp://username@hostname[:port]/path/to/remote\nOR\nhelmscp scp://username@hostname:port/path/to/chart")
 	}
@@ -117,20 +157,45 @@ func main() {
 			return
 		}
 		fmt.Printf("Success!\n")
-	} else {
-		err = Scp("", url, action)
+	} else if action == Download {
+		err = Scp("", url, Download)
+		if err != nil {
+			log.Fatalf("Error while downloading the asset: %s", err)
+			return
+		}
+	} else if action == Delete {
+		var version string
+		mySet := flag.NewFlagSet("", flag.ExitOnError)
+		mySet.StringVar(&version, "version", "", "Chart version")
+		mySet.Parse(os.Args[3:])
+		repoURL, err := getRepoURL(os.Args[len(os.Args)-1])
 		if err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}
+		url, err = detokenize(repoURL)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		chartName := os.Args[2]
+		err = delete(version, url, chartName)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+	} else if action == Init {
+		err = reindex(url)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Println("Incorrect command usage")
+		os.Exit(1)
 	}
 }
 func Package(chartPath string) (string, error) {
-	if os.Getenv("HELM_BIN") != "" {
-		helmBin = os.Getenv("HELM_BIN")
-	} else {
-		helmBin = "helm"
-	}
 	fmt.Printf("Packaging chart from %s\n", chartPath)
 	cmd := exec.Command(helmBin, "package", chartPath)
 	var out bytes.Buffer
@@ -175,7 +240,10 @@ func Scp(filename string, url URL, action Action) error {
 		if err != nil {
 			return err
 		}
-		reindex(url)
+		err = reindex(url)
+		if err != nil {
+			return err
+		}
 		fmt.Printf("Cleaning up\n")
 		return nil
 	} else if action == Download {
@@ -202,28 +270,7 @@ func Scp(filename string, url URL, action Action) error {
 		}
 		return nil
 	} else if action == Delete {
-		if strings.HasSuffix(remoteFile, "/") {
-			return errors.New("remote path must be a file not a directory")
-		}
-		sshClient, err := ssh.Dial("tcp", url.host+":"+url.port, &clientConfig)
-		if err != nil {
-			return err
-		}
-		defer sshClient.Close()
-		session, err := sshClient.NewSession()
-		if err != nil {
-			return err
-		}
-		defer session.Close()
-		fmt.Printf("Deleting %s\n", remoteFile)
-		if err := session.Run("rm -f " + remoteFile); err != nil {
-			return fmt.Errorf("could not delete %s", remoteFile)
-		}
-		err = reindex(url)
-		if err != nil {
-			return err
-		}
-		return nil
+
 	} else if action == Init {
 		err = reindex(url)
 		if err != nil {
@@ -233,11 +280,31 @@ func Scp(filename string, url URL, action Action) error {
 	}
 	return nil
 }
-
-func reindex(url URL) error {
-	if strings.HasSuffix(url.path, "/") {
-		return errors.New("remote path must be a file not a directory")
+func delete(version string, url URL, chartName string) error {
+	var err error
+	clientConfig, _ := auth.PrivateKey(url.username, key, ssh.InsecureIgnoreHostKey())
+	sshClient, err := ssh.Dial("tcp", url.host+":"+url.port, &clientConfig)
+	if err != nil {
+		return err
 	}
+	defer sshClient.Close()
+	session, err := sshClient.NewSession()
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	remoteFile := fmt.Sprintf("%s/%s-%s.tgz", url.path, chartName, version)
+	fmt.Printf("Deleting %s\n", remoteFile)
+	if err := session.Run("rm -f " + remoteFile); err != nil {
+		return fmt.Errorf("could not delete %s", remoteFile)
+	}
+	err = reindex(url)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+func reindex(url URL) error {
 	chartDir := url.path
 	clientConfig, _ := auth.PrivateKey(url.username, key, ssh.InsecureIgnoreHostKey())
 	sshClient, err := ssh.Dial("tcp", url.host+":"+url.port, &clientConfig)
