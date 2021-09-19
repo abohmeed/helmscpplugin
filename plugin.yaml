@@ -1,5 +1,5 @@
 name: "scp"
-version: "0.2.1"
+version: "0.2.2"
 usage: "helm scp"
 description: "Package and upload Helm charts over SCP"
 ignoreFlags: false
