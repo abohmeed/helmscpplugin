@@ -165,7 +165,7 @@ func Scp(filename string, url URL, action Action) error {
 		fmt.Printf("Uploading %s to %s at %s@%s:%s\n", baseFileName, remoteFile, url.username, url.host, url.port)
 		// Finaly, copy the file over
 		// Usage: CopyFile(fileReader, remotePath, permission)
-		err = client.CopyFile(f, url.path+baseFileName, "0644")
+		err = client.CopyFile(f, remoteFile+baseFileName, "0644")
 		if err != nil {
 			return err
 		}
