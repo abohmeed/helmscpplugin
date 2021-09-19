@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path"
@@ -139,7 +140,7 @@ func Package(chartPath string) (string, error) {
 	return chartNameFullPath, nil
 }
 func Scp(filename string, url URL, action Action) error {
-	clientConfig, _ := auth.PrivateKey(url.username, key, ssh.InsecureIgnoreHostKey())
+	clientConfig, _ := auth.PrivateKey(url.username, key, func(hostname string, remote net.Addr, key ssh.PublicKey) error { return nil })
 	client := scp.NewClient(url.host+":"+url.port, &clientConfig)
 	err := client.Connect()
 	if err != nil {
@@ -220,7 +221,7 @@ func Scp(filename string, url URL, action Action) error {
 }
 func reindex(url URL) error {
 	charDir := path.Dir(url.path)
-	clientConfig, _ := auth.PrivateKey(url.username, key, ssh.InsecureIgnoreHostKey())
+	clientConfig, _ := auth.PrivateKey(url.username, key, func(hostname string, remote net.Addr, key ssh.PublicKey) error { return nil })
 	sshClient, err := ssh.Dial("tcp", url.host+":"+url.port, &clientConfig)
 	if err != nil {
 		return err
