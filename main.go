@@ -2,12 +2,13 @@ package main
 
 import (
 	"bytes"
-	"flag"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	scp "github.com/bramvdbogaerde/go-scp"
@@ -15,54 +16,101 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-var username, key, port, chartPath, remotePath, host string
+type Action int
+
+const (
+	Upload = iota
+	Download
+)
+const Protocol = "scp"
+
+var key, chartPath string
+var action Action
 var helmBin string
 
-func initialize() {
-	flag.Usage = func() {
-		flag.PrintDefaults()
+type URL struct {
+	username string
+	host     string
+	port     string
+	path     string
+}
+
+// helm scp push /path/to/chart scp://ahmed@192.168.2.164:22/myrepo
+func detokenize(url string) (URL, error) {
+	regex := `scp:\/\/(\w+)@(\d+\.\d+\.\d+\.\d+):?(\d+)?(.*)$`
+	r := regexp.MustCompile(regex)
+	if !r.MatchString(url) {
+		return URL{}, errors.New("INVALID SCP URL")
 	}
-	flag.StringVar(&username, "u", "", "The remote server username")
-	flag.StringVar(&key, "k", os.Getenv("HOME")+"/.ssh/id_rsa", "The SSH key")
-	flag.StringVar(&port, "p", "22", "The remote server port")
-	flag.StringVar(&remotePath, "r", "", "Path to the remote directory")
-	flag.StringVar(&chartPath, "l", "", "Path to the chart directory")
-	flag.StringVar(&host, "s", "", "The hostname or IP address")
-	flag.Parse()
-	if host == "" {
-		flag.PrintDefaults()
-		fmt.Println("Please supply the hostname or IP address to the remote host")
-		os.Exit(2)
+	m := r.FindAllStringSubmatch(url, -1)
+	username := m[0][1]
+	host := m[0][2]
+	port := "22"
+	if m[0][3] != "" {
+		port = m[0][3]
 	}
-	if username == "" {
-		flag.PrintDefaults()
-		fmt.Println("Please provide the username to connect to the remote host over SSH")
-		os.Exit(2)
+	remotePath := "/home/" + username + "/"
+	if m[0][4] != "" {
+		remotePath = m[0][4]
 	}
-	if remotePath == "" {
-		flag.PrintDefaults()
-		fmt.Println("Please provide the remote path to save the file")
-		os.Exit(2)
+	return URL{
+		username: username,
+		host:     host,
+		port:     port,
+		path:     remotePath,
+	}, nil
+}
+func initialize() (URL, error) {
+	var url URL
+	var err error
+	if os.Getenv("SCP_KEY") != "" {
+		key = os.Getenv("SCP_KEY")
 	}
-	if chartPath == "" {
-		flag.PrintDefaults()
-		fmt.Println("Please provide the path to the Helm chart")
-		os.Exit(2)
+	if len(os.Args) == 4 {
+		if os.Args[1] == "push" {
+			url, err = detokenize(os.Args[3])
+			if err != nil {
+				return url, errors.New("please make sure the URL is scp://username@host[:port]/path")
+			}
+			chartPath = os.Args[2]
+			action = Upload
+		}
+	} else if len(os.Args) == 5 {
+		url, err = detokenize(os.Args[4])
+		if err != nil {
+			return URL{}, errors.New("please make sure the URL is scp://username@host[:port]/path")
+		}
+		action = Download
+	} else {
+		return URL{}, errors.New("incorrect arguments.\nUsage:\nhelmscp push /path/to/chart scp://username@hostname[:port]/path/to/remote\nOR\nhelmscp scp://username@hostname:port/path/to/chart")
 	}
+	return url, nil
 }
 func main() {
-	initialize()
-	chartFile, err := Package(chartPath)
+	url, err := initialize()
 	if err != nil {
-		log.Fatalf("Error while packaging the chart: %s", err)
-		return
+		fmt.Println(err)
+		os.Exit(1)
 	}
-	err = Upload(chartFile)
-	if err != nil {
-		log.Fatalf("Error while uploading the archive: %s", err)
-		return
+	if action == Upload {
+		chartFile, err := Package(chartPath)
+		if err != nil {
+			log.Fatalf("Error while packaging the chart: %s", err)
+			return
+		}
+		err = Scp(chartFile, url, Upload)
+		if err != nil {
+			log.Fatalf("Error while uploading the archive: %s", err)
+			return
+		}
+		fmt.Printf("Success!\n")
+	} else {
+		err = Scp("", url, Download)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
 	}
-	fmt.Printf("Success!\n")
 }
 func Package(chartPath string) (string, error) {
 	if os.Getenv("HELM_BIN") != "" {
@@ -83,40 +131,61 @@ func Package(chartPath string) (string, error) {
 	chartNameFullPath = strings.Trim(chartNameFullPath, " ")
 	return chartNameFullPath, nil
 }
-func Upload(filename string) error {
-	if remotePath == "" {
-		remotePath = fmt.Sprintf("/home/%s/", username)
-	}
-	if remotePath[len(remotePath)-1:] != "/" {
-		remotePath = remotePath + "/"
-	}
-	clientConfig, _ := auth.PrivateKey(username, key, ssh.InsecureIgnoreHostKey())
-	client := scp.NewClient(host+":"+port, &clientConfig)
+func Scp(filename string, url URL, action Action) error {
+	clientConfig, _ := auth.PrivateKey(url.username, key, ssh.InsecureIgnoreHostKey())
+	client := scp.NewClient(url.host+":"+url.port, &clientConfig)
 	err := client.Connect()
 	if err != nil {
 		log.Fatal("Couldn't establish a connection to the remote server ", err)
 		return err
 	}
-	// Open a file
-	f, err := os.Open(filename)
-	if err != nil {
-		log.Fatalf("Could not open filename to upload: %s", err)
-		return err
-	}
 	// Close client connection after the file has been copied
 	defer client.Close()
-	// Close the file after it has been copied
-	defer f.Close()
-	defer os.Remove(filename)
 	baseFileName := filepath.Base(filename)
-	fmt.Printf("Uploading %s to %s at %s@%s:%s\n", baseFileName, remotePath, username, host, port)
-	// Finaly, copy the file over
-	// Usage: CopyFile(fileReader, remotePath, permission)
-	err = client.CopyFile(f, remotePath+baseFileName, "0644")
-	if err != nil {
-		log.Fatalf("Could not upload the file to the remote server: %s", err)
-		return err
+	if action == Upload {
+		if url.path[len(url.path)-1:] != "/" {
+			url.path = url.path + "/"
+		}
+		// Open a file
+		f, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("Could not open %s: %s", filename, err)
+			return err
+		}
+		defer f.Close()
+		defer os.Remove(filename)
+		fmt.Printf("Uploading %s to %s at %s@%s:%s\n", baseFileName, url.path, url.username, url.host, url.port)
+		// Finaly, copy the file over
+		// Usage: CopyFile(fileReader, remotePath, permission)
+		err = client.CopyFile(f, url.path+baseFileName, "0644")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Cleaning up\n")
+		return nil
+	} else {
+		remoteFile := url.path
+		// Must point to a file not a directory
+		if strings.HasSuffix(remoteFile, "/") {
+			return errors.New("remote path must be a file not a directory")
+		}
+		sshClient, err := ssh.Dial("tcp", url.host+":"+url.port, &clientConfig)
+		if err != nil {
+			return err
+		}
+		defer sshClient.Close()
+		session, err := sshClient.NewSession()
+		if err != nil {
+			return err
+		}
+		defer session.Close()
+		if err := session.Run("stat " + remoteFile); err != nil {
+			return fmt.Errorf("could not download %s", remoteFile)
+		}
+		err = client.CopyFromRemote(os.Stdout, remoteFile)
+		if err != nil {
+			return err
+		}
+		return nil
 	}
-	fmt.Printf("Cleaning up\n")
-	return nil
 }
